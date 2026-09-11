@@ -106,7 +106,7 @@ function registerModeShadow<T extends object>(
     loadModels: () => ctx.remote.session.modelCatalog(),
     openMemberSession: openMemberSessionImpl,
   }
-  ctx.slots.inject(name, () => {
+  ctx.slots.inject(name as any, () => {
     let dispose: (() => void) | undefined
     const reconcile = (): void => {
       const snapshot = navigation.getSnapshot()
@@ -116,7 +116,7 @@ function registerModeShadow<T extends object>(
       const active = snapshot.mode === 'team' && !(name === 'conversation' && snapshot.memberSessionId !== undefined)
       if (active && dispose === undefined) {
         dispose = ctx.slots.register({
-          name,
+          name: name as any,
           priority: -100,
           locale: NS,
           inject: () => ({

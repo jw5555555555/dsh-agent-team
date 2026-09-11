@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { IconUserOutline16, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { IconUserOutline16, Modal, Pill, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamFooterProps } from './slots.ts'
 import { TeamPresenceDot } from './TeamPresenceDot.tsx'
 import membersCss from './members.module.css'
@@ -14,6 +14,30 @@ export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActi
   const [error, setError] = useState<string>()
   const triggerRef = useRef<HTMLButtonElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+
+  const { globalMembers, workspaceGroups } = useMemo(() => {
+    const globalById = new Map<string, (typeof groups)[number]['members'][number]>()
+    const wGroups: Array<(typeof groups)[number]> = []
+    for (const group of groups) {
+      const localMembers = []
+      for (const status of group.members) {
+        if (status.member.isGlobal) {
+          if (!globalById.has(status.member.memberId)) {
+            globalById.set(status.member.memberId, status)
+          }
+        } else {
+          localMembers.push(status)
+        }
+      }
+      if (localMembers.length > 0) {
+        wGroups.push({ ...group, members: localMembers })
+      }
+    }
+    return {
+      globalMembers: Array.from(globalById.values()),
+      workspaceGroups: wGroups,
+    }
+  }, [groups])
 
   useEffect(() => {
     if (!panelOpen) return
@@ -34,6 +58,8 @@ export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActi
     queueMicrotask(() => { triggerRef.current?.focus() })
   }
 
+  const totalCount = globalMembers.length + workspaceGroups.reduce((acc, g) => acc + g.members.length, 0)
+
   return (
     <>
       <Tooltip label={t('members')} delayMs={500} disabled={wide}>
@@ -45,14 +71,43 @@ export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActi
       <Modal open={panelOpen} onClose={closeMembers} title={t('members')} closeLabel={t('close')} contentClassName={membersCss.body!}>
         <div ref={contentRef} className={membersCss.content} tabIndex={-1}>
           {loading && <p className={membersCss.state} role="status">{t('loadingAgents')}</p>}
-          {!loading && groups.length === 0 && error === undefined && <p className={membersCss.state}>{t('emptyAgents')}</p>}
-          {!loading && groups.map(group => (
+          {!loading && totalCount === 0 && error === undefined && <p className={membersCss.state}>{t('emptyAgents')}</p>}
+          {!loading && globalMembers.length > 0 && (
+            <section className={membersCss.group} key="global-agents" aria-labelledby="team-members-global">
+              <h3 id="team-members-global">{t('globalAgentsSection')}</h3>
+              {globalMembers.map(status => (
+                <div className={membersCss.member} key={status.member.memberId}>
+                  <TeamPresenceDot status={status} t={t} />
+                  <span className={membersCss.copy}>
+                    <strong>
+                      @{status.member.handle}
+                      <Pill style={{ marginLeft: 6, fontSize: 10, lineHeight: '16px', height: 18, padding: '0 6px', verticalAlign: 'middle' }}>
+                        {t('globalBadge')}
+                      </Pill>
+                    </strong>
+                    <small>{status.member.description}</small>
+                  </span>
+                </div>
+              ))}
+            </section>
+          )}
+          {!loading && workspaceGroups.map(group => (
             <section className={membersCss.group} key={group.workspaceId} aria-labelledby={`team-members-${group.workspaceId}`}>
               <h3 id={`team-members-${group.workspaceId}`}>{group.workspaceTitle}</h3>
               {group.members.map(status => (
                 <div className={membersCss.member} key={status.member.memberId}>
                   <TeamPresenceDot status={status} t={t} />
-                  <span className={membersCss.copy}><strong>@{status.member.handle}</strong><small>{status.member.description}</small></span>
+                  <span className={membersCss.copy}>
+                    <strong>
+                      @{status.member.handle}
+                      {status.member.isGlobal && (
+                        <Pill style={{ marginLeft: 6, fontSize: 10, lineHeight: '16px', height: 18, padding: '0 6px', verticalAlign: 'middle' }}>
+                          {t('globalBadge')}
+                        </Pill>
+                      )}
+                    </strong>
+                    <small>{status.member.description}</small>
+                  </span>
                 </div>
               ))}
             </section>

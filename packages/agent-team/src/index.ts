@@ -15,7 +15,8 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -112,9 +113,11 @@ import type {
   AgentTeamView,
   AgentTeamViewRequest,
 } from './types.ts'
+import { isGlobalMember } from './types/entities.ts'
 
 export { agentTeamDomainSpec, agentTeamOperationSchema } from './spec.ts'
 export type * from './types.ts'
+export { isGlobalMember } from './types/entities.ts'
 export { AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_INITIALIZE_REQUEST_ID } from './ledger.ts'
 export { AGENT_TEAM_TOOL_NAMES } from './member-runtime.ts'
 
@@ -288,6 +291,8 @@ export default class AgentTeam extends TypertRemoteService {
   private readonly handles = new Map<AgentTeamMemberId, AgentHandle>()
   /** Live Member per session id; drives the root session/event listener. */
   private readonly memberBySessionId = new Map<SessionId, AgentTeamMemberId>()
+  /** Active Workspace per session id; tracks dynamic workspace binding for global agents. */
+  private readonly workspaceBySessionId = new Map<SessionId, WorkspaceId>()
   /** Live selection refs let model edits take effect without disposing the Session. */
   private readonly modelSelections = new Map<AgentTeamMemberId, ModelSelectionRef>()
   /** Agent ids with a turn in flight; restarts must wait for the boundary. */
@@ -475,7 +480,7 @@ export default class AgentTeam extends TypertRemoteService {
     this.startAttachmentGc(ledger)
     // One metadata listing serves every Member restore; per-member list calls
     // would repeat the same I/O linearly during startup.
-    const persistedSessions = new Set((await this.persistedSessionHeaders()).map(header => header.id))
+    const persistedSessions = new Set((await this.persistedSessionHeaders()).map(entry => (entry as any).header?.id ?? (entry as any).id))
     for (const member of ledger.listMembers()) {
       if (member.state === 'enabled') await this.activateMember(member, undefined, persistedSessions)
       else if (member.state === 'inactive') await this.memberRuntime.cleanupRemovedMember(member)
@@ -492,11 +497,68 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private async sessionPersisted(sessionId: SessionId): Promise<boolean> {
     try {
-      await this.ctx.sessionPersistence.inspect(sessionId)
-      return true
+      if (typeof this.ctx.sessionPersistence.stat === 'function') {
+        const snapshot = await this.ctx.sessionPersistence.stat(sessionId)
+        if (snapshot !== undefined) return true
+      }
+      if (typeof (this.ctx.sessionPersistence as any).inspect === 'function') {
+        await (this.ctx.sessionPersistence as any).inspect(sessionId)
+        return true
+      }
+      if (typeof this.ctx.sessionPersistence.open === 'function') {
+        const handle = await this.ctx.sessionPersistence.open(sessionId, 'read')
+        await handle.close().catch(() => {})
+        return true
+      }
+      return false
     } catch {
       return false
     }
+  }
+
+  private async inspectSession(sessionId: SessionId): Promise<{ readonly events: readonly SessionEvent[]; readonly inheritedEventCount: SessionLogOffset; readonly meta: SessionHeader }> {
+    if (typeof (this.ctx.sessionPersistence as any).inspect === 'function') {
+      return await (this.ctx.sessionPersistence as any).inspect(sessionId)
+    }
+    const handle = await this.ctx.sessionPersistence.open(sessionId, 'read')
+    try {
+      const read = await handle.read()
+      return {
+        events: read.events,
+        inheritedEventCount: handle.inheritedEventCount,
+        meta: handle.header,
+      }
+    } finally {
+      await handle.close().catch(() => {})
+    }
+  }
+
+  /** Determine the active Workspace ID for an Agent session by inspecting cwd or session attachment. */
+  resolveWorkspaceIdForAgent(
+    agent: Agent | { readonly sessionId?: SessionId; readonly session?: { readonly id?: SessionId; readonly header?: { readonly cwd?: string } }; readonly workspaceId?: WorkspaceId; readonly cwd?: string },
+  ): WorkspaceId | undefined {
+    if (typeof (agent as { readonly workspaceId?: WorkspaceId }).workspaceId === 'string') {
+      return (agent as { readonly workspaceId?: WorkspaceId }).workspaceId
+    }
+    const cwd = (agent as Agent).session?.header?.cwd ?? (agent as { readonly cwd?: string }).cwd
+    if (cwd !== undefined) {
+      const normalizedCwd = cwd.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+      try {
+        const list = typeof this.ctx.workspaceRegistry?.list === 'function' ? this.ctx.workspaceRegistry.list() : []
+        for (const w of list) {
+          if (w.path !== undefined && w.path.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase() === normalizedCwd) {
+            return w.id as WorkspaceId
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+    const sessionId = (agent as Agent).session?.id ?? (agent as { readonly sessionId?: SessionId }).sessionId
+    if (sessionId !== undefined && this.workspaceBySessionId.has(sessionId)) {
+      return this.workspaceBySessionId.get(sessionId)
+    }
+    return undefined
   }
 
   /** Resolve one exact live Agent to its durable Team Member; forks do not inherit identity. */
@@ -530,7 +592,7 @@ export default class AgentTeam extends TypertRemoteService {
   membersForClient(request: AgentTeamMembersRequest): readonly AgentTeamClientMemberStatus[] {
     this.requireWorkspace(request.workspaceId)
     return this.members()
-      .filter(status => status.member.workspaceId === request.workspaceId)
+      .filter(status => status.member.workspaceId === request.workspaceId || isGlobalMember(status.member))
       .map(({ member: { privateMemoryPath: _privateMemoryPath, ...member }, ...status }) => Object.freeze({ ...status, member: Object.freeze(member) }))
   }
 
@@ -618,6 +680,9 @@ export default class AgentTeam extends TypertRemoteService {
     return this.enqueueLifecycle(async () => {
       const workspace = this.requireWorkspace(request.workspaceId)
       await this.assertModelRoute(request.model)
+      if (request.isGlobal !== undefined && typeof request.isGlobal !== 'boolean') {
+        throw new Error(`isGlobal must be a boolean, received ${typeof request.isGlobal}`)
+      }
       const memberId = `member:${randomUUID()}` as AgentTeamMemberId
       const member: AgentTeamAgentMember = Object.freeze({
         memberId,
@@ -626,6 +691,7 @@ export default class AgentTeam extends TypertRemoteService {
         handle: request.handle,
         description: request.description,
         presetId: request.presetId,
+        ...(request.isGlobal !== undefined ? { isGlobal: Boolean(request.isGlobal) } : {}),
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
         ...(request.capabilities === undefined ? {} : { capabilities: Object.freeze(deepCopyCapabilities(request.capabilities)) }),
         privateMemoryPath: dshHomePath('agent-team', 'members', memberMemoryDirectoryName(memberId)),
@@ -1305,7 +1371,7 @@ export default class AgentTeam extends TypertRemoteService {
   viewForAgent(agent: Agent, request: AgentTeamViewRequest): AgentTeamView {
     const member = this.memberForAgent(agent)
     if (member === undefined) throw new Error('Agent is not an active Team Member')
-    if (member.workspaceId !== request.workspaceId) throw new Error('Member cannot view another Workspace')
+    if (!isGlobalMember(member) && member.workspaceId !== request.workspaceId) throw new Error('Member cannot view another Workspace')
     return this.requireLedger().view(request, member.memberId)
   }
 
@@ -1410,7 +1476,7 @@ export default class AgentTeam extends TypertRemoteService {
         live = false
       } else {
         try {
-          const inspection = await this.ctx.sessionPersistence.inspect(sessionId)
+          const inspection = await this.inspectSession(sessionId)
           events = inspection.events
           inheritedEventCount = inspection.inheritedEventCount
           parentSession = inspection.meta.parentSession
@@ -1495,7 +1561,7 @@ export default class AgentTeam extends TypertRemoteService {
     if (previousSessionId === undefined) return
     let inspection: { events: readonly SessionEvent[]; inheritedEventCount: SessionLogOffset }
     try {
-      const result = await this.ctx.sessionPersistence.inspect(previousSessionId)
+      const result = await this.inspectSession(previousSessionId)
       inspection = result
     } catch (error) {
       this.ctx.logger.warn(`agent-team: rollover handoff reconstruction could not read the previous Session '${previousSessionId}': ${error instanceof Error ? error.message : String(error)}`)
@@ -1531,7 +1597,7 @@ export default class AgentTeam extends TypertRemoteService {
   private async recordedCheckpointPrefix(seed: { readonly sourceSessionId: SessionId; readonly sourceThroughSeq: SessionLogOffset; readonly checkpointRef: AgentTeamContextCheckpointRef }): Promise<{ readonly prefix: readonly SessionEvent[] }> {
     let inspection: { events: readonly SessionEvent[]; inheritedEventCount: SessionLogOffset }
     try {
-      inspection = await this.ctx.sessionPersistence.inspect(seed.sourceSessionId)
+      inspection = await this.inspectSession(seed.sourceSessionId)
     } catch (error) {
       throw new Error(`the recorded checkpoint-return seed source Session '${seed.sourceSessionId}' is unreadable: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -1567,7 +1633,7 @@ export default class AgentTeam extends TypertRemoteService {
     if (transition === undefined || transition.targetSessionId !== agent.session.id) return 0
     let inspection: { events: readonly SessionEvent[]; inheritedEventCount: SessionLogOffset }
     try {
-      inspection = await this.ctx.sessionPersistence.inspect(transition.previousSessionId)
+      inspection = await this.inspectSession(transition.previousSessionId)
     } catch (error) {
       throw new Error(`the previous Session '${transition.previousSessionId}' holding the Member's carried input is unreadable: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -1652,7 +1718,7 @@ export default class AgentTeam extends TypertRemoteService {
         live = false
       } else {
         try {
-          const inspection = await this.ctx.sessionPersistence.inspect(sessionId)
+          const inspection = await this.inspectSession(sessionId)
           state = foldContextProjection(inspection.events, inspection.inheritedEventCount, sessionId)
           sourceEvents = inspection.events
           sourceSessionId = sessionId
@@ -1689,19 +1755,18 @@ export default class AgentTeam extends TypertRemoteService {
    * closed on the unknown.
    */
   private async sourceUsageTokens(sessionId: SessionId, live: boolean, agent: Agent): Promise<number | undefined> {
-    const meter = agent.ctx.get('tokenMeter')
+    const meter = agent.ctx.get('tokenMeter') ?? (this.ctx as any).get?.('tokenMeter')
     if (meter === undefined) return undefined
     if (live) return meter.measure(agent.session)?.totalTokens
     try {
-      using borrowed = await this.ctx.sessionPersistence.borrowSession(sessionId)
-      // The borrow resolves the exact Session object for both shapes: the
-      // live instance for an attached Session, the prepared one for an
-      // archived ancestor. Measuring through the service context's store
-      // would need an inject this service does not declare.
-      const session = borrowed.source === 'live'
-        ? agent.session.id === sessionId ? agent.session : undefined
-        : borrowed.preparedSession
-      return session === undefined ? undefined : meter.measure(session)?.totalTokens
+      if (typeof (this.ctx.sessionPersistence as any)?.borrowSession === 'function') {
+        using borrowed = await (this.ctx.sessionPersistence as any).borrowSession(sessionId)
+        const session = borrowed.source === 'live'
+          ? agent.session.id === sessionId ? agent.session : undefined
+          : borrowed.preparedSession
+        return session === undefined ? undefined : meter.measure(session)?.totalTokens
+      }
+      return meter.measure({ id: sessionId } as any)?.totalTokens
     } catch {
       return undefined
     }
@@ -1978,7 +2043,11 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   private requireAgentWorkspace(actor: AgentTeamMemberActor, workspaceId: AgentTeamViewRequest['workspaceId']): void {
-    if (this.requireLedger().getMember(actor.memberId)?.workspaceId !== workspaceId) throw new Error('Member cannot mutate another Workspace')
+    const member = this.requireLedger().getMember(actor.memberId)
+    if (member === undefined) throw new Error(`Unknown Member '${actor.memberId}'`)
+    if (!isGlobalMember(member) && member.workspaceId !== workspaceId) {
+      throw new Error('Member cannot mutate another Workspace')
+    }
   }
 
   /**
@@ -2019,12 +2088,65 @@ export default class AgentTeam extends TypertRemoteService {
     }
   }
 
-  private async activateMember(member: AgentTeamAgentMember, knownWorkspacePath?: string, knownSessions?: ReadonlySet<SessionId>, forkedFrom?: SessionId, options?: { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset }): Promise<void> {
-    if (this.handles.has(member.memberId)) return
+  async activateMember(
+    member: AgentTeamAgentMember,
+    knownWorkspacePath?: string | { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset; readonly targetWorkspaceId?: WorkspaceId | undefined },
+    knownSessions?: ReadonlySet<SessionId>,
+    forkedFrom?: SessionId,
+    options?: { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset; readonly targetWorkspaceId?: WorkspaceId | undefined },
+    targetWorkspaceId?: WorkspaceId,
+  ): Promise<void> {
+    let explicitOptions = options
+    let explicitPath: string | undefined
+    let explicitTargetWorkspace = targetWorkspaceId ?? options?.targetWorkspaceId
+    if (typeof knownWorkspacePath === 'object' && knownWorkspacePath !== null) {
+      explicitOptions = knownWorkspacePath
+      explicitTargetWorkspace = explicitTargetWorkspace ?? knownWorkspacePath.targetWorkspaceId
+    } else if (typeof knownWorkspacePath === 'string') {
+      explicitPath = knownWorkspacePath
+      if (explicitTargetWorkspace === undefined && (knownWorkspacePath.startsWith('workspace:') || this.ctx.workspaceRegistry.get(knownWorkspacePath as WorkspaceId) !== undefined)) {
+        explicitTargetWorkspace = knownWorkspacePath as WorkspaceId
+      }
+    }
+
+    let contextResolvedWorkspaceId: WorkspaceId | undefined
+    if (explicitPath !== undefined) {
+      const normalized = explicitPath.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+      try {
+        const list = typeof this.ctx.workspaceRegistry?.list === 'function' ? this.ctx.workspaceRegistry.list() : []
+        for (const w of list) {
+          if (w.path !== undefined && w.path.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase() === normalized) {
+            contextResolvedWorkspaceId = w.id as WorkspaceId
+            break
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const effectiveWorkspaceId = isGlobalMember(member)
+      ? (explicitTargetWorkspace ?? contextResolvedWorkspaceId ?? member.workspaceId)
+      : member.workspaceId
+
+    const existingHandle = this.handles.get(member.memberId)
+    if (existingHandle !== undefined) {
+      if (isGlobalMember(member) && explicitTargetWorkspace !== undefined && explicitTargetWorkspace !== this.workspaceBySessionId.get(member.sessionId)) {
+        await existingHandle.dispose()
+        this.handles.delete(member.memberId)
+        this.memberBySessionId.delete(member.sessionId)
+        this.workspaceBySessionId.delete(member.sessionId)
+        this.modelSelections.delete(member.memberId)
+        this.memberRuntime.forgetMember(member.memberId)
+      } else {
+        return
+      }
+    }
+
     let created: AgentHandle | undefined
     try {
-      const workspace = this.requireWorkspace(member.workspaceId)
-      const workspacePath = knownWorkspacePath ?? workspace.path
+      const workspace = this.requireWorkspace(effectiveWorkspaceId)
+      const workspacePath = explicitPath ?? workspace.path
       // Existing Members carry the pre-sanitization ledger path; activation
       // migrates it onto the sanitized directory before provisioning.
       const sanitizedMemoryPath = dshHomePath('agent-team', 'members', memberMemoryDirectoryName(member.memberId))
@@ -2041,7 +2163,7 @@ export default class AgentTeam extends TypertRemoteService {
       // allow-list filters the catalog by name through the live ref below.
       // `swap` is bound by the provider at activation (no-op until then).
       const skillSelection: MemberSkillSelectionRef = { current: member.capabilities?.skills?.allow, swap: () => {} }
-      const setup = async (agentCtx: Context) => {
+      const setup = async (agentCtx: Context, unpublishedAgent?: Agent) => {
         await this.ctx.agentPresets.mount(agentCtx, member.presetId)
         this.memberRuntime.applyMemberToolPolicy(agentCtx, member)
         this.validateMemberPreset(agentCtx)
@@ -2084,14 +2206,14 @@ export default class AgentTeam extends TypertRemoteService {
         })
         return {
           commit: () => {
-            const agent = agentCtx.agent
+            const agent = unpublishedAgent ?? agentCtx.get('agent')
             if (agent === undefined) throw new Error('agent-team setup has no unpublished Agent')
             // The member scope composes no sandbox-policy service (the preset
             // owns no sandbox row), so read the last logged mode straight from
             // the session log; `sandbox/mode` is log-only and never joins the
             // model-visible surface. Re-appending only when the effective mode
             // differs keeps resumed members from growing redundant events.
-            const logged = agent.session.ownEvents().toReversed().find(event => event.type === 'sandbox/mode')
+            const logged = agent.session.ownEvents().toReversed().find((event: SessionEvent) => event.type === 'sandbox/mode')
             if (logged?.data.mode !== 'danger-full-access') setSandboxMode(agent.session, 'danger-full-access')
           },
         }
@@ -2148,6 +2270,7 @@ export default class AgentTeam extends TypertRemoteService {
       await workspace.attachSession(member.sessionId)
       this.handles.set(member.memberId, created)
       this.memberBySessionId.set(member.sessionId, member.memberId)
+      this.workspaceBySessionId.set(member.sessionId, effectiveWorkspaceId)
       this.modelSelections.set(member.memberId, selected)
       this.clearMemberFailure(member.memberId, 'activation')
       this.nameMemberSession(member, created.agent)
@@ -2198,15 +2321,16 @@ export default class AgentTeam extends TypertRemoteService {
       // never leapfrog the carried messages. A rollover activation defers the
       // wake entirely — its caller delivers the handoff (and carried input)
       // first and rederives the Inbox afterwards.
-      if (options?.deferNotify !== true) this.notifyMember(created.agent, recoveryCarried > 0)
+      if (explicitOptions?.deferNotify !== true) this.notifyMember(created.agent, recoveryCarried > 0)
     } catch (error) {
       await created?.dispose()
       this.modelSelections.delete(member.memberId)
+      this.workspaceBySessionId.delete(member.sessionId)
       this.memberRuntime.forgetMember(member.memberId)
       this.setMemberFailure(member.memberId, 'activation', error instanceof Error ? error.message : String(error))
     } finally {
       // Activation only changes this Workspace's presence projection.
-      this.emitChanged([{ kind: 'workspace', workspaceId: member.workspaceId }])
+      this.emitChanged(isGlobalMember(member) ? undefined : [{ kind: 'workspace', workspaceId: member.workspaceId }])
     }
   }
 
@@ -2221,13 +2345,14 @@ export default class AgentTeam extends TypertRemoteService {
    * the cost — the Web Client marks the recreated Session unavailable until it
    * is reopened, the same trade the shipped suspend/resume cycle makes.
    */
-  private reactivateMember(memberId: AgentTeamMemberId): Promise<boolean> {
+  reactivateMember(memberId: AgentTeamMemberId, targetWorkspaceId?: WorkspaceId): Promise<boolean> {
     return this.enqueueLifecycle(async () => {
       const member = this.requireLedger().getMember(memberId)
       if (member === undefined || member.state !== 'enabled') return false
       const stale = this.handles.get(memberId)
       if (stale !== undefined) {
         this.handles.delete(memberId)
+        this.workspaceBySessionId.delete(member.sessionId)
         this.modelSelections.delete(memberId)
         this.memberRuntime.forgetMember(memberId)
         // The composition-loss diagnostic this heal answers is stale once the
@@ -2236,7 +2361,7 @@ export default class AgentTeam extends TypertRemoteService {
         this.emitAutoCompactionChanged(memberId)
         await stale.dispose()
       }
-      await this.activateMember(member)
+      await this.activateMember(member, undefined, undefined, undefined, targetWorkspaceId !== undefined ? { targetWorkspaceId } : undefined)
       return this.handles.has(memberId)
     })
   }
@@ -2372,8 +2497,8 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   private emitAutoCompactionChanged(memberId: AgentTeamMemberId): void {
-    const workspaceId = this.ledger?.getMember(memberId)?.workspaceId
-    this.emitChanged(workspaceId === undefined ? undefined : [{ kind: 'workspace', workspaceId }])
+    const member = this.ledger?.getMember(memberId)
+    this.emitChanged(member === undefined || isGlobalMember(member) ? undefined : [{ kind: 'workspace', workspaceId: member.workspaceId }])
   }
 
   /** Wake from durable unread state with bounded facts for direct and state-changing work. */
@@ -2537,6 +2662,7 @@ export default class AgentTeam extends TypertRemoteService {
       this.handles.delete(memberId)
     }
     this.memberBySessionId.delete(member.sessionId)
+    this.workspaceBySessionId.delete(member.sessionId)
     this.modelSelections.delete(memberId)
     this.memberRuntime.forgetMember(memberId)
     this.clearMemberFailure(memberId, 'activation')

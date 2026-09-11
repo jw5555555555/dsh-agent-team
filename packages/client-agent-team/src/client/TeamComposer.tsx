@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ChangeEvent, ClipboardEvent, KeyboardEvent } from 'react'
 import type { AgentTeamClientMemberStatus, AgentTeamMemberId } from '@wowyuarm/dsh-agent-team/types'
-import { Button, IconPlusOutline16, IconSendOutline16, useAnchoredMaxHeight, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconPlusOutline16, IconSendOutline16, Pill, useAnchoredMaxHeight, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamConversationProps } from './slots.ts'
 import { TeamPresenceDot } from './TeamPresenceDot.tsx'
 import css from './composer.module.css'
@@ -309,7 +309,14 @@ export function TeamComposer({ members, followerMemberIds, recipients, draft, pe
                   onClick={() => { selectOption(option) }}
                 >
                   <TeamPresenceDot status={option.status} t={t} />
-                  <span className={css.mentionName}>@{option.status.member.handle}</span>
+                  <span className={css.mentionName}>
+                    @{option.status.member.handle}
+                    {option.status.member.isGlobal && (
+                      <Pill style={{ marginLeft: 6, fontSize: 10, lineHeight: '16px', height: 18, padding: '0 6px', verticalAlign: 'middle' }}>
+                        {t('globalBadge')}
+                      </Pill>
+                    )}
+                  </span>
                   <span className={css.mentionDescription}>{option.status.member.description}</span>
                 </button>
           })}

@@ -3,7 +3,7 @@ import type { AgentTeamClientMemberStatus, AgentTeamChannelRef, AgentTeamMemberI
   AgentTeamTaskRef, AgentTeamThreadRef,
 } from '@wowyuarm/dsh-agent-team/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import { Button, IconChevronLeftOutline14, IconChevronRightOutline14, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronLeftOutline14, IconChevronRightOutline14, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamConversationProps } from './slots.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
 import { mintRequestId } from './requests.ts'
@@ -307,7 +307,17 @@ export function TeamChannelPage({ workspaceId, channelRef, loadChannels, subscri
           const rowError = membership.errors.get(status.member.memberId)
           return <div className={channelCss.memberRow} key={status.member.memberId}>
             <TeamPresenceDot status={status} t={t} />
-            <span className={channelCss.memberCopy}><strong>@{status.member.handle}</strong><small>{status.member.description}</small></span>
+            <span className={channelCss.memberCopy}>
+              <strong>
+                @{status.member.handle}
+                {status.member.isGlobal && (
+                  <Pill style={{ marginLeft: 6, fontSize: 10, lineHeight: '16px', height: 18, padding: '0 6px', verticalAlign: 'middle' }}>
+                    {t('globalBadge')}
+                  </Pill>
+                )}
+              </strong>
+              <small>{status.member.description}</small>
+            </span>
             <Button className={channelCss.memberAction} size="sm" disabled={disabled} onClick={() => { void membership.change({ workspaceId, channelRef, memberId: status.member.memberId, joined }) }}>{rowPending ? t('membershipUpdating') : joined ? t('removeFromChannel') : t('addToChannel')}</Button>
             {rowError !== undefined && <p className={channelCss.memberError} role="alert">{rowError}</p>}
           </div>

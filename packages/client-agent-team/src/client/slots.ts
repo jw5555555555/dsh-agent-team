@@ -118,6 +118,12 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
     selectedChannelRef?: AgentTeamChannelRef
   }
 
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    conversation: { kind: 'single'; scope: 'root' }
+  }
+}
+
 export type TeamConversationProps = PropsRuntime<'conversation'> & PropsLocale<'team'> & TeamNavigationActions & {
   navigation: TeamNavigationSource
   /** Keyed composer draft cache; one store per Client context. */

@@ -118,6 +118,7 @@ import type {
   AgentTeamViewRequest,
 } from './types.ts'
 import { formatTeamTimestamp } from './time-format.ts'
+import { isGlobalMember } from './types/entities.ts'
 
 /** Stable Human Member identity shared by every replay of one dshHome Team. */
 export const AGENT_TEAM_HUMAN_MEMBER_ID = 'member:human' as AgentTeamMemberId
@@ -475,11 +476,20 @@ export class AgentTeamLedger {
       const presetId = request.presetId.trim()
       if (handle === '') throw new Error('member handle must not be empty')
       if (presetId === '') throw new Error('member preset must not be empty')
+      if (request.isGlobal !== undefined && typeof request.isGlobal !== 'boolean') {
+        throw new Error(`isGlobal must be a boolean, received ${typeof request.isGlobal}`)
+      }
       // Description and initial Channels are optional: a Member with neither is
       // still drivable through its DM view, and joins Channels later.
       const channelRefs = this.normalizeUnique(request.channelRefs, 'initial Member Channels')
-      for (const channelRef of channelRefs) this.requireActiveChannel(request.workspaceId, channelRef)
-      this.assertHandleAvailable(request.workspaceId, handle)
+      const isGlobal = Boolean(request.isGlobal ?? isGlobalMember(request.member))
+      for (const channelRef of channelRefs) {
+        const channel = this.state.channels.get(this.requireRefKey(this.state.channels, channelRef, 'channel', 'Channel'))
+        if (channel === undefined) throw new Error(`unknown Channel ref '${channelRef}'${this.unknownRefHint(channelRef, 'channel', 'Channel')}`)
+        if (!isGlobal && channel.workspaceId !== request.workspaceId) throw new Error(`Channel '${channelRef}' does not belong to Workspace '${request.workspaceId}'`)
+        if (channel.state === 'archived') throw new Error(`Channel '${channelRef}' is archived and no longer accepts Team work`)
+      }
+      this.assertHandleAvailable(request.workspaceId, handle, undefined, isGlobal)
       this.assertModelSelection(request.member.model)
       this.assertCapabilities(request.member.capabilities)
       const member = Object.freeze({
@@ -512,17 +522,38 @@ export class AgentTeamLedger {
       const handle = request.handle.trim()
       const description = request.description.trim()
       if (handle === '') throw new Error('member handle must not be empty')
-      if (handle !== prior.handle) this.assertHandleAvailable(prior.workspaceId, handle, prior.memberId)
+      if (request.isGlobal !== undefined && typeof request.isGlobal !== 'boolean') {
+        throw new Error(`isGlobal must be a boolean, received ${typeof request.isGlobal}`)
+      }
+      const targetIsGlobal = request.isGlobal !== undefined ? request.isGlobal : isGlobalMember(prior)
+      if (isGlobalMember(prior) && targetIsGlobal === false) {
+        const foreignChannels: AgentTeamChannel[] = []
+        for (const [channelRef, memberIds] of this.state.memberships.entries()) {
+          if (memberIds.has(prior.memberId)) {
+            const channel = this.state.channels.get(channelRef)
+            if (channel !== undefined && channel.workspaceId !== prior.workspaceId) {
+              foreignChannels.push(channel)
+            }
+          }
+        }
+        if (foreignChannels.length > 0) {
+          throw new Error(`Cannot demote Agent Member '${prior.memberId}' to workspace-scoped while enrolled in foreign channels`)
+        }
+      }
+      if (handle !== prior.handle || targetIsGlobal !== isGlobalMember(prior)) {
+        this.assertHandleAvailable(prior.workspaceId, handle, prior.memberId, targetIsGlobal)
+      }
       this.assertModelSelection(request.model)
       this.assertCapabilities(request.capabilities)
       // An absent model or capabilities field must CLEAR any override
       // (inherit the Host default / full standard capability surface);
       // spreading `prior` verbatim would silently keep the pinned value.
-      const { model: _priorModel, capabilities: _priorCapabilities, ...priorWithoutOverlays } = prior
+      const { model: _priorModel, capabilities: _priorCapabilities, isGlobal: _priorIsGlobal, ...priorWithoutOverlays } = prior
       const member = Object.freeze({
         ...priorWithoutOverlays, handle, description,
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
         ...freezeCapabilities(request.capabilities),
+        ...(targetIsGlobal !== undefined ? { isGlobal: targetIsGlobal } : {}),
       })
       const operation: AgentTeamMemberUpdatedOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/member-updated',
@@ -775,7 +806,7 @@ export class AgentTeamLedger {
       this.assertHumanActor(request.actor)
       const channel = this.requireActiveChannel(request.workspaceId, request.channelRef)
       const member = this.requireMember(request.memberId)
-      if (member.workspaceId !== request.workspaceId) throw new Error('Member and Channel must belong to one Workspace')
+      if (!isGlobalMember(member) && member.workspaceId !== request.workspaceId) throw new Error('Member and Channel must belong to one Workspace')
       if (member.state !== 'enabled') throw new Error(`Agent Member '${member.memberId}' is ${member.state}; only enabled Members can join a Channel`)
       if (this.isChannelMember(channel.channelRef, member.memberId)) throw new Error(`Agent Member '${member.memberId}' already belongs to Channel '${channel.channelRef}'`)
       const operation: AgentTeamChannelMemberAddedOperation = Object.freeze({
@@ -800,7 +831,7 @@ export class AgentTeamLedger {
       this.assertHumanActor(request.actor)
       const channel = this.requireChannel(request.workspaceId, request.channelRef)
       const member = this.requireMember(request.memberId)
-      if (member.workspaceId !== channel.workspaceId || !this.isChannelMember(channel.channelRef, member.memberId)) {
+      if ((!isGlobalMember(member) && member.workspaceId !== channel.workspaceId) || !this.isChannelMember(channel.channelRef, member.memberId)) {
         throw new Error(`Agent Member '${member.memberId}' is not a member of Channel '${channel.channelRef}'`)
       }
       const threadRefs = this.channelThreadRefs(channel.channelRef)
@@ -1475,7 +1506,7 @@ export class AgentTeamLedger {
     if (!Number.isInteger(cursor) || cursor < 0) throw new Error('cursor must be a non-negative integer sequence')
     if (memberId !== undefined) {
       const member = this.requireMember(memberId)
-      if (member.workspaceId !== request.workspaceId) throw new Error('Member cannot view another Workspace')
+      if (!isGlobalMember(member) && member.workspaceId !== request.workspaceId) throw new Error('Member cannot view another Workspace')
     }
     if (request.channelRef !== undefined) {
       this.requireActiveChannel(request.workspaceId, request.channelRef)
@@ -1574,16 +1605,18 @@ export class AgentTeamLedger {
         // The rename is visible in the sidebar list and any open Channel/Thread header.
         return [{ kind: 'workspace', workspaceId: operation.data.workspaceId }, { kind: 'channel', channelRef: operation.data.channel.channelRef }]
       case 'team/member-added':
+      case 'team/member-updated':
       case 'team/member-suspended':
       case 'team/member-resumed':
       case 'team/member-session-restarted':
       case 'team/member-context-cleared':
       case 'team/member-session-renewed':
       case 'team/member-session-rolled-over':
-      case 'team/member-updated':
       case 'team/member-removed':
+        if (isGlobalMember(operation.data.member)) return undefined
         return [{ kind: 'workspace', workspaceId: operation.data.member.workspaceId }]
       case 'team/member-archived': {
+        if (isGlobalMember(operation.data.member)) return undefined
         // Claim releases are thread-visible facts: open Channel and Thread
         // pages refetch alongside the workspace-wide roster change.
         const channelByTask = new Map(operation.data.tasks.map(task => [task.taskRef, task.channelRef]))
@@ -1759,7 +1792,7 @@ export class AgentTeamLedger {
       if (unique.size !== memberIds.length) throw new Error('invalid initial Channel members')
       for (const memberId of memberIds) {
         const member = projection.members.get(memberId)
-        if (member === undefined || member.workspaceId !== channel.workspaceId || member.state !== 'enabled') throw new Error('invalid initial Channel Member')
+        if (member === undefined || (!isGlobalMember(member) && member.workspaceId !== channel.workspaceId) || member.state !== 'enabled') throw new Error('invalid initial Channel Member')
       }
       return
     }
@@ -1770,7 +1803,7 @@ export class AgentTeamLedger {
       this.addRef(refs, member.memberId)
       for (const channelRef of channelRefs) {
         const channel = projection.channels.get(channelRef)
-        if (channel === undefined || channel.workspaceId !== member.workspaceId) throw new Error('invalid initial Member Channel')
+        if (channel === undefined || (!isGlobalMember(member) && channel.workspaceId !== member.workspaceId)) throw new Error('invalid initial Member Channel')
       }
       return
     }
@@ -1844,10 +1877,18 @@ export class AgentTeamLedger {
         || operation.data.member.sessionId !== prior.sessionId || operation.data.member.workspaceId !== prior.workspaceId
         || operation.data.member.presetId !== prior.presetId
         || operation.data.member.privateMemoryPath !== prior.privateMemoryPath) throw new Error('invalid Member update')
-      // The renamed handle must stay unique among the workspace's other live Members.
+      if (isGlobalMember(prior) && !isGlobalMember(operation.data.member)) {
+        for (const [channelRef, memberIds] of projection.memberships.entries()) {
+          if (memberIds.has(prior.memberId) && projection.channels.get(channelRef)?.workspaceId !== prior.workspaceId) {
+            throw new Error('invalid Member demotion')
+          }
+        }
+      }
+      // The renamed handle must stay unique among other live Members.
       const normalized = operation.data.member.handle.normalize('NFKC').trim().toLowerCase()
       for (const other of projection.members.values()) {
-        if (other.memberId !== prior.memberId && other.state !== 'inactive' && other.workspaceId === prior.workspaceId
+        if (other.memberId !== prior.memberId && other.state !== 'inactive'
+          && (isGlobalMember(operation.data.member) || other.workspaceId === prior.workspaceId || isGlobalMember(other))
           && other.handle.normalize('NFKC').trim().toLowerCase() === normalized) throw new Error('invalid Member update handle')
       }
       return
@@ -1856,7 +1897,7 @@ export class AgentTeamLedger {
       assertHuman()
       const channel = projection.channels.get(operation.data.channelRef)
       const member = projection.members.get(operation.data.memberId)
-      if (channel === undefined || member === undefined || member.workspaceId !== channel.workspaceId || operation.data.workspaceId !== channel.workspaceId || projection.memberships.get(channel.channelRef)?.has(member.memberId)) throw new Error('invalid Channel membership')
+      if (channel === undefined || member === undefined || (!isGlobalMember(member) && member.workspaceId !== channel.workspaceId) || operation.data.workspaceId !== channel.workspaceId || projection.memberships.get(channel.channelRef)?.has(member.memberId)) throw new Error('invalid Channel membership')
       return
     }
     if (operation.kind === 'team/channel-member-removed') {
@@ -1864,7 +1905,7 @@ export class AgentTeamLedger {
       const channel = projection.channels.get(operation.data.channelRef)
       const member = projection.members.get(operation.data.memberId)
       if (channel === undefined || member === undefined || operation.data.workspaceId !== channel.workspaceId
-        || member.workspaceId !== channel.workspaceId || !projection.memberships.get(channel.channelRef)?.has(member.memberId)) throw new Error('invalid Channel membership removal')
+        || (!isGlobalMember(member) && member.workspaceId !== channel.workspaceId) || !projection.memberships.get(channel.channelRef)?.has(member.memberId)) throw new Error('invalid Channel membership removal')
       const threadRefs = new Set([...projection.threads.keys()].filter(threadRef => this.channelRefForThreadFrom(projection, threadRef) === channel.channelRef))
       this.validateReleaseCleanup(operation.data, projection, member.memberId, threadRefs, operation.sequence, refs)
       return
@@ -2314,7 +2355,7 @@ export class AgentTeamLedger {
     if (memberId === AGENT_TEAM_HUMAN_MEMBER_ID) return true
     const member = projection.members.get(memberId)
     return member !== undefined && member.state !== 'inactive' && member.state !== 'archived'
-      && projection.channels.get(channelRef)?.workspaceId === member.workspaceId
+      && (isGlobalMember(member) || projection.channels.get(channelRef)?.workspaceId === member.workspaceId)
       && this.isChannelMemberFrom(projection, channelRef, memberId)
   }
 
@@ -2838,7 +2879,7 @@ export class AgentTeamLedger {
     for (const memberId of recipients) {
       if (memberId === AGENT_TEAM_HUMAN_MEMBER_ID) continue
       const member = this.requireMember(memberId)
-      if (member.state === 'inactive' || member.state === 'archived' || member.workspaceId !== channel.workspaceId || !this.isChannelMember(channel.channelRef, memberId)) {
+      if (member.state === 'inactive' || member.state === 'archived' || (!isGlobalMember(member) && member.workspaceId !== channel.workspaceId) || !this.isChannelMember(channel.channelRef, memberId)) {
         throw new Error(`Agent Member '${memberId}' is not authorized for Channel '${channel.channelRef}'`)
       }
     }
@@ -3012,7 +3053,7 @@ export class AgentTeamLedger {
       return actor
     }
     const member = this.assertMemberActor(actor)
-    if (member.workspaceId !== workspaceId) throw new Error('Member cannot mutate another Workspace')
+    if (!isGlobalMember(member) && member.workspaceId !== workspaceId) throw new Error('Member cannot mutate another Workspace')
     return actor
   }
 
@@ -3188,12 +3229,12 @@ export class AgentTeamLedger {
   }
 
   private channelThreadRefs(channelRef: AgentTeamChannelRef): Set<AgentTeamThreadRef> {
-    return new Set([...this.state.tasks.values()].filter(task => task.channelRef === channelRef).map(task => task.threadRef))
+    return new Set([...this.state.threads.keys()].filter(threadRef => this.channelRefForThread(threadRef) === channelRef))
   }
 
   private assertJoinableMember(workspaceId: WorkspaceId, memberId: AgentTeamMemberId): void {
     const member = this.requireMember(memberId)
-    if (member.workspaceId !== workspaceId) throw new Error(`Agent Member '${memberId}' does not belong to Workspace '${workspaceId}'`)
+    if (!isGlobalMember(member) && member.workspaceId !== workspaceId) throw new Error(`Agent Member '${memberId}' does not belong to Workspace '${workspaceId}'`)
     if (member.state !== 'enabled') throw new Error(`Agent Member '${memberId}' is ${member.state}; only enabled Members can join a Channel`)
   }
 
@@ -3213,12 +3254,23 @@ export class AgentTeamLedger {
     return direction.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase()
   }
 
-  private assertHandleAvailable(workspaceId: WorkspaceId, handle: string, exceptMemberId?: AgentTeamMemberId): void {
+  private assertHandleAvailable(workspaceId: WorkspaceId, handle: string, exceptMemberId?: AgentTeamMemberId, isGlobal?: boolean): void {
     const normalized = handle.normalize('NFKC').trim().toLowerCase()
-    if ([...this.state.members.values()].some(member => member.memberId !== exceptMemberId && member.state !== 'inactive'
-      && member.workspaceId === workspaceId
-      && member.handle.normalize('NFKC').trim().toLowerCase() === normalized)) {
-      throw new Error(`Agent Member handle '${handle}' is already active in Workspace '${workspaceId}'`)
+    if (isGlobal) {
+      const collision = [...this.state.members.values()].find(member =>
+        member.memberId !== exceptMemberId && member.state !== 'inactive'
+        && member.handle.normalize('NFKC').trim().toLowerCase() === normalized)
+      if (collision) {
+        throw new Error(`Agent Member handle '${handle}' is already active in Workspace '${collision.workspaceId}'`)
+      }
+    } else {
+      const collision = [...this.state.members.values()].find(member =>
+        member.memberId !== exceptMemberId && member.state !== 'inactive'
+        && member.handle.normalize('NFKC').trim().toLowerCase() === normalized
+        && (member.workspaceId === workspaceId || isGlobalMember(member)))
+      if (collision) {
+        throw new Error(`Agent Member handle '${handle}' is already active in Workspace '${collision.workspaceId}'`)
+      }
     }
   }
 
@@ -3271,6 +3323,7 @@ export class AgentTeamLedger {
       || operation.data.member.description !== request.description.trim() || operation.data.member.presetId !== request.presetId.trim()
       || !isDeepStrictEqual(operation.data.member.model ?? undefined, request.member.model ?? undefined)
       || !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.member.capabilities ?? undefined)
+      || isGlobalMember(operation.data.member) !== isGlobalMember(request.member)
       || !this.sameList(operation.data.channelRefs, this.normalizeUnique(request.channelRefs, 'initial Member Channels'))) this.throwRequestCollision(request.requestId)
   }
 
@@ -3301,11 +3354,13 @@ export class AgentTeamLedger {
   }
 
   private assertSameMemberUpdate(operation: AgentTeamOperation, request: AgentTeamAuthorizedUpdateMemberRequest): asserts operation is AgentTeamMemberUpdatedOperation {
+    const prior = this.state.members.get(request.memberId)
     if (operation.kind !== 'team/member-updated' || !this.sameActor(operation.actor, request.actor)
       || operation.data.member.memberId !== request.memberId || operation.data.member.handle !== request.handle.trim()
       || operation.data.member.description !== request.description.trim()
       || !isDeepStrictEqual(operation.data.member.model ?? undefined, request.model ?? undefined)
-      || !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.capabilities ?? undefined)) this.throwRequestCollision(request.requestId)
+      || !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.capabilities ?? undefined)
+      || (Boolean(request.isGlobal ?? isGlobalMember(prior)) !== isGlobalMember(operation.data.member))) this.throwRequestCollision(request.requestId)
   }
 
   private assertSameChannelJoin(operation: AgentTeamOperation, request: AgentTeamAuthorizedJoinChannelRequest): asserts operation is AgentTeamChannelMemberAddedOperation {

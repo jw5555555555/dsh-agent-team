@@ -8,6 +8,8 @@ import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
 import { loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
+// @ts-ignore
+import { harnessDir } from '../../../scripts/harness-dir.mjs'
 
 const root = resolve(import.meta.dirname, '../../../')
 
@@ -34,8 +36,8 @@ describe('Agent Team shipping contract', () => {
     const composed = applyEntryPatches([], [
       // rc.1 moved the storage rows from web-app into the base bundle; the
       // real layer stack is base → web-app → this bundle.
-      ...loadOverlayPatches('shipping contract', resolve(root, '../deepseek-harness/packages/bundle/base/cordis.patch.yml')),
-      ...loadOverlayPatches('shipping contract', resolve(root, '../deepseek-harness/packages/bundle/web-app/cordis.patch.yml')),
+      ...loadOverlayPatches('shipping contract', resolve(harnessDir, 'packages/bundle/base/cordis.patch.yml')),
+      ...loadOverlayPatches('shipping contract', resolve(harnessDir, 'packages/bundle/web-app/cordis.patch.yml')),
       ...loadOverlayPatches('shipping contract', resolve(root, 'cordis.patch.yml')),
     ], () => {})
     const ids = composed.map(entry => entry.id)

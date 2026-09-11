@@ -5,7 +5,7 @@ import type {
   AgentTeamModelSelection,
 } from '@wowyuarm/dsh-agent-team/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import { Button, IconArchiveOutline20, IconEditOutline16, IconPlayOutline16, IconPlusOutline16, IconRefreshOutline16, Input, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconArchiveOutline20, IconEditOutline16, IconPlayOutline16, IconPlusOutline16, IconRefreshOutline16, Input, Modal, Pill, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamSidebarProps } from './slots.ts'
 import { TeamMemberAvatar } from './TeamMemberAvatar.tsx'
 import { SortableRow, useSidebarRowDrag } from './sidebar-drag.tsx'
@@ -27,6 +27,8 @@ interface TeamAgentsPanelProps {
   readonly recoverMember: TeamSidebarProps['recoverMember']
   readonly archiveMember: TeamSidebarProps['archiveMember']
   readonly loadModels: TeamSidebarProps['loadModels']
+  readonly loadChannels?: TeamSidebarProps['loadChannels']
+  readonly workspaces?: readonly { readonly workspaceId: WorkspaceId }[]
   /** The Member Session currently embedded in the conversation seat, if any. */
   readonly memberSessionId?: AgentTeamClientMemberStatus['member']['sessionId']
   readonly openMemberSession: TeamSidebarProps['openMemberSession']
@@ -34,7 +36,7 @@ interface TeamAgentsPanelProps {
   readonly t: TeamSidebarProps['t']
 }
 
-export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, recoverMember, archiveMember, loadModels, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
+export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, recoverMember, archiveMember, loadModels, loadChannels, workspaces, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
@@ -42,6 +44,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
   const [handle, setHandle] = useState('')
   const [description, setDescription] = useState('')
   const [model, setModel] = useState<AgentTeamModelSelection | undefined>(undefined)
+  const [scope, setScope] = useState<'workspace' | 'global'>('workspace')
   const [creating, setCreating] = useState(false)
   const [retryRequest, setRetryRequest] = useState<AgentTeamAddMemberRequest>()
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -159,6 +162,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         setHandle('')
         setDescription('')
         setModel(undefined)
+        setScope('workspace')
         setFormOpen(false)
         if (result.value.status.presence === 'unavailable') {
           setError(result.value.status.diagnostic ?? t('statusUnavailable'))
@@ -183,9 +187,11 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
     const normalizedHandle = handle.trim()
     const normalizedDescription = description.trim()
     if (normalizedHandle.length === 0 || creating) return
+    const isGlobal = scope === 'global'
     const sameRequest = retryRequest !== undefined && retryRequest.workspaceId === workspaceId
       && retryRequest.handle === normalizedHandle && retryRequest.description === normalizedDescription
       && sameModel(retryRequest.model, model)
+      && (retryRequest.isGlobal ?? false) === isGlobal
       && retryRequest.channelRefs.length === 0
     void provision(sameRequest ? retryRequest : {
       requestId: mintRequestId(),
@@ -197,6 +203,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
       // the Channel side and stays reachable through its DM view meanwhile.
       channelRefs: [],
       ...(model === undefined ? {} : { model }),
+      ...(isGlobal ? { isGlobal: true } : {}),
     })
   }
 
@@ -220,6 +227,39 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
             <Input className={createCss.input!} value={description} placeholder={t('agentDescriptionPlaceholder')} onChange={event => { setDescription(event.target.value); setRetryRequest(undefined) }} disabled={creating} />
           </label>
           <ModelPickerField model={model} onModelChange={choice => { setModel(choice); setRetryRequest(undefined) }} loadModels={loadModels} disabled={creating} t={t} />
+          <div className={createCss.field}>
+            <span>{t('agentScope')}</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }} role="radiogroup" aria-label={t('agentScope')}>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: creating ? 'not-allowed' : 'pointer' }}>
+                <input
+                  type="radio"
+                  name="agent-scope"
+                  value="workspace"
+                  checked={scope === 'workspace'}
+                  onChange={() => { setScope('workspace'); setRetryRequest(undefined) }}
+                  disabled={creating}
+                />
+                <div>
+                  <strong>{t('workspaceAgent')}</strong>
+                  <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>{t('workspaceAgentDesc')}</div>
+                </div>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: creating ? 'not-allowed' : 'pointer' }}>
+                <input
+                  type="radio"
+                  name="agent-scope"
+                  value="global"
+                  checked={scope === 'global'}
+                  onChange={() => { setScope('global'); setRetryRequest(undefined) }}
+                  disabled={creating}
+                />
+                <div>
+                  <strong>{t('globalAgent')}</strong>
+                  <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>{t('globalAgentDesc')}</div>
+                </div>
+              </label>
+            </div>
+          </div>
           {formOpen && error !== undefined && <p className={createCss.error} role="alert">{error}</p>}
         </form>
       </Modal>
@@ -240,7 +280,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         <div className={css.agentList}>
           {orderedMembers.map(status => (
             <SortableRow key={status.member.memberId} drag={drag} orderKey={status.member.memberId}>
-              <AgentRow status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} openMemberSession={openMemberSession} onUpdated={() => { void refresh() }} t={t} />
+              <AgentRow status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} loadChannels={loadChannels} workspaces={workspaces} openMemberSession={openMemberSession} onUpdated={() => { void refresh() }} t={t} />
             </SortableRow>
           ))}
         </div>
@@ -260,7 +300,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
  * conversation page, the avatar carries identity plus the presence badge, and
  * the row menu opens the editor.
  */
-function AgentRow({ status, current, updateMember, recoverMember, archiveMember, loadModels, openMemberSession, onUpdated, t }: {
+function AgentRow({ status, current, updateMember, recoverMember, archiveMember, loadModels, loadChannels, workspaces, openMemberSession, onUpdated, t }: {
   readonly status: AgentTeamClientMemberStatus
   /** This Member's Session is the one embedded in the conversation seat. */
   readonly current?: boolean
@@ -268,6 +308,8 @@ function AgentRow({ status, current, updateMember, recoverMember, archiveMember,
   readonly recoverMember: TeamSidebarProps['recoverMember']
   readonly archiveMember: TeamSidebarProps['archiveMember']
   readonly loadModels: TeamSidebarProps['loadModels']
+  readonly loadChannels?: TeamSidebarProps['loadChannels'] | undefined
+  readonly workspaces?: readonly { readonly workspaceId: WorkspaceId }[] | undefined
   readonly openMemberSession: TeamSidebarProps['openMemberSession']
   readonly onUpdated: () => Promise<void> | void
   readonly t: TeamSidebarProps['t']
@@ -309,9 +351,7 @@ function AgentRow({ status, current, updateMember, recoverMember, archiveMember,
         memberId: status.member.memberId,
       })
       await onUpdated()
-      if (!result.ok) {
-        setRowAlert(t('archiveAgentFailed', { message: result.error.message }))
-      }
+      if (!result.ok) setRowAlert(t('archiveAgentFailed', { message: result.error.message }))
     } catch (cause) {
       setRowAlert(t('archiveAgentFailed', { message: cause instanceof Error ? cause.message : String(cause) }))
     }
@@ -322,7 +362,14 @@ function AgentRow({ status, current, updateMember, recoverMember, archiveMember,
         <button type="button" className={css.agentSelect} aria-label={t('openAgentSession', { name: status.member.handle })} aria-current={current ? 'page' : undefined} disabled={status.availability !== 'active'} onClick={() => { openMemberSession(status.member.sessionId) }}>
           <TeamMemberAvatar status={status} t={t} />
           <span className={css.agentCopy}>
-            <strong>{status.member.handle}</strong>
+            <strong>
+              {status.member.handle}
+              {status.member.isGlobal && (
+                <Pill style={{ marginLeft: 6, fontSize: 10, lineHeight: '16px', height: 18, padding: '0 6px', verticalAlign: 'middle' }}>
+                  {t('globalBadge')}
+                </Pill>
+              )}
+            </strong>
             <small>{status.member.description}</small>
           </span>
         </button>
@@ -365,6 +412,8 @@ function AgentRow({ status, current, updateMember, recoverMember, archiveMember,
           status={status}
           updateMember={updateMember}
           loadModels={loadModels}
+          loadChannels={loadChannels}
+          workspaces={workspaces}
           onCommitted={onUpdated}
           onClose={() => { setEditing(false) }}
           t={t}

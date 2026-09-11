@@ -84,6 +84,7 @@ const memberSchema = z.object({
   capabilities: memberCapabilitiesSchema.optional(),
   privateMemoryPath: z.string().min(1),
   state: z.union([z.literal('enabled'), z.literal('suspended'), z.literal('inactive'), z.literal('archived')]),
+  isGlobal: z.boolean().optional(),
 }).strict()
 
 const channelSchema = z.object({

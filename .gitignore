@@ -8,3 +8,4 @@ artifacts/
 # Local generation-time state: sync-paths.mjs rewrites it per run (a cert
 # generation records the tag-suffixed checkout name). Never commit it.
 .generated-harness
+.agents/

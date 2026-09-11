@@ -114,6 +114,26 @@ export interface AgentTeamAgentMember {
    * data cleanup.
    */
   readonly state: 'enabled' | 'suspended' | 'inactive' | 'archived'
+  /**
+   * Whether the Member participates globally across all workspaces.
+   * When true, the member retains its creation workspaceId as its home workspace,
+   * but can join channels and be mentioned across any workspace.
+   */
+  readonly isGlobal?: boolean | undefined
+}
+
+/** Returns true if the member participates globally across all workspaces. */
+export function isGlobalMember(member?: { readonly isGlobal?: boolean | undefined } | null): boolean {
+  return member?.isGlobal === true
+}
+
+declare module './requests-results.ts' {
+  interface AgentTeamAddMemberRequest {
+    readonly isGlobal?: boolean | undefined
+  }
+  interface AgentTeamUpdateMemberRequest {
+    readonly isGlobal?: boolean | undefined
+  }
 }
 
 /**

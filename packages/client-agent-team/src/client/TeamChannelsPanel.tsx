@@ -10,7 +10,7 @@ import type {
   AgentTeamView,
 } from '@wowyuarm/dsh-agent-team/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import { Button, IconArchiveOutline20, IconEditOutline16, IconPlusOutline16, Input, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconArchiveOutline20, IconEditOutline16, IconPlusOutline16, Input, Modal, Pill, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamSidebarProps } from './slots.ts'
 import { TeamPresenceDot } from './TeamPresenceDot.tsx'
 import { MultiMenuField } from './multi-menu-field.tsx'
@@ -170,10 +170,10 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
           <label className={createCss.field}><span>{t('channelDescription')}{t('optionalSuffix')}</span><Input className={createCss.input!} value={description} placeholder={t('agentDescriptionPlaceholder')} disabled={mutating} onChange={event => { setDescription(event.target.value); setPendingCreate(undefined) }} /></label>
           <MultiMenuField label={t('initialMembers')} disabled={mutating}
             options={[
-              ...creatingAgents.map(request => ({ id: request.requestId, label: request.handle, disabled: true, hint: t('memberCreatingReason') })),
+              ...creatingAgents.map(request => ({ id: request.requestId, label: `${request.handle}${request.isGlobal ? ` (${t('globalBadge')})` : ''}`, disabled: true, hint: t('memberCreatingReason') })),
               ...members.map(status => ({
                 id: status.member.memberId,
-                label: status.member.handle,
+                label: `${status.member.handle}${status.member.isGlobal ? ` (${t('globalBadge')})` : ''}`,
                 ...(status.presence === 'unavailable' ? { disabled: true, hint: t('memberUnavailableReason') } : {}),
                 icon: <TeamPresenceDot status={status} t={t} />,
               })),
@@ -413,7 +413,17 @@ function ChannelEditorDialog({ channel, members, joinedIds, updateChannel, joinC
             const rowError = membership.errors.get(status.member.memberId)
             return <div className={css.editMemberRow} key={status.member.memberId}>
               <TeamPresenceDot status={status} t={t} />
-              <span className={css.editMemberCopy}><strong>@{status.member.handle}</strong><small>{status.member.description}</small></span>
+              <span className={css.editMemberCopy}>
+                <strong>
+                  @{status.member.handle}
+                  {status.member.isGlobal && (
+                    <Pill style={{ marginLeft: 6, fontSize: 10, lineHeight: '16px', height: 18, padding: '0 6px', verticalAlign: 'middle' }}>
+                      {t('globalBadge')}
+                    </Pill>
+                  )}
+                </strong>
+                <small>{status.member.description}</small>
+              </span>
               <Button size="sm" variant="outline" disabled={disabled} onClick={() => { void membership.change({ workspaceId: channel.workspaceId, channelRef: channel.channelRef, memberId: status.member.memberId, joined }) }}>{rowPending ? t('membershipUpdating') : joined ? t('removeFromChannel') : t('addToChannel')}</Button>
               {rowError !== undefined && <p className={css.rowError} role="alert">{rowError}</p>}
             </div>

@@ -31,6 +31,13 @@ function Frame({ renderSlot }: FrameProps) {
 
 function BaselineWorkspace() { return <div data-baseline-workspaces>普通工作区</div> }
 function BaselineSettings() { return <div data-baseline-settings>设置</div> }
+function BaselineConversation() {
+  return (
+    <div data-phase="active" data-baseline-conversation>
+      <div data-composer-seat="">普通对话</div>
+    </div>
+  )
+}
 interface SeededMessage {
   readonly body: string
   readonly occurredAt: string
@@ -38,7 +45,7 @@ interface SeededMessage {
   readonly mentions?: readonly string[]
 }
 
-export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: string; initialChannels?: boolean; remainingUnreadCounts?: readonly number[]; seededMessages?: readonly SeededMessage[]; seedTaskRef?: string; seedThreadRef?: string; seedTaskStatus?: 'in_progress'; seedFollowers?: readonly string[] }) {
+export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: string; initialChannels?: boolean; remainingUnreadCounts?: readonly number[]; seededMessages?: readonly SeededMessage[]; seedTaskRef?: string; seedThreadRef?: string; seedTaskStatus?: 'in_progress'; seedFollowers?: readonly string[]; extraMembers?: readonly { memberId: string; workspaceId: string; handle: string; presence: 'available' | 'working' | 'error' | 'unavailable'; diagnostic?: string; isGlobal?: boolean }[] }) {
   if (options?.mode !== undefined) {
     localStorage.setItem('dsh.agent-team.navigation', JSON.stringify({ mode: options.mode, ...(options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId }) }))
   }
@@ -68,10 +75,11 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     loadOlder: vi.fn(async () => {}),
     send: vi.fn(async () => {}),
   } as never)
-  const status = (memberId: string, workspaceId: string, handle: string, presence: 'available' | 'working' | 'error' | 'unavailable', diagnostic?: string) => ({
+  const status = (memberId: string, workspaceId: string, handle: string, presence: 'available' | 'working' | 'error' | 'unavailable', diagnostic?: string, isGlobal?: boolean) => ({
     member: {
       memberId, workspaceId, handle, description: `${handle} description`,
       presetId: 'team-member', state: 'enabled', sessionId: `session:${memberId}`,
+      ...(isGlobal ? { isGlobal: true } : {}),
     },
     availability: presence === 'unavailable' ? 'unavailable' : 'active',
     presence,
@@ -83,14 +91,16 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     status('member:failed', 'w1', 'failed', 'error', 'model failed'),
     status('member:offline', 'w1', 'offline', 'unavailable', 'preset missing'),
     status('member:builder-beta', 'w2', 'builder', 'available'),
+    ...(options?.extraMembers?.map(m => status(m.memberId, m.workspaceId, m.handle, m.presence, m.diagnostic, m.isGlobal)) ?? []),
   ]
-  const members = vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ ok: true, value: memberRows.filter(entry => entry.member.workspaceId === workspaceId) }))
+  const members = vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ ok: true, value: memberRows.filter(entry => entry.member.workspaceId === workspaceId || entry.member.isGlobal === true) }))
   const addMember = vi.fn(async (request: AgentTeamAddMemberRequest) => ({ ok: true, value: {
     receipt: {},
     status: {
       member: {
         memberId: 'member:new', workspaceId: request.workspaceId, handle: request.handle, description: request.description,
         presetId: request.presetId, state: 'enabled', sessionId: 'session:new',
+        ...(request.isGlobal ? { isGlobal: true } : {}),
       },
       availability: 'active', presence: 'available',
     },
@@ -138,9 +148,9 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
       ? { ...channel, name: request.name, description: request.description } : channel)
     return { ok: true as const, value: { receipt: {}, channel: channels.find(channel => channel.channelRef === request.channelRef) } }
   })
-  const updateMember = vi.fn(async (request: { requestId: string; memberId: string; handle: string; description: string; model?: { provider: string; model: string } }) => {
+  const updateMember = vi.fn(async (request: { requestId: string; memberId: string; handle: string; description: string; isGlobal?: boolean; model?: { provider: string; model: string } }) => {
     memberRows = memberRows.map(entry => entry.member.memberId === request.memberId
-      ? { ...entry, member: { ...entry.member, handle: request.handle, description: request.description, ...(request.model === undefined ? {} : { model: request.model }) } }
+      ? { ...entry, member: { ...entry.member, handle: request.handle, description: request.description, ...(request.isGlobal !== undefined ? { isGlobal: request.isGlobal } : {}), ...(request.model === undefined ? {} : { model: request.model }) } }
       : entry)
     const status = memberRows.find(entry => entry.member.memberId === request.memberId)
     return { ok: true as const, value: { receipt: {}, ...(status === undefined ? {} : { status }) } }
@@ -332,7 +342,8 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   await runtime.mount({ inject: [...injectConversation], apply: applyConversation })
   const disposeWorkspace = runtime.slots.register({ name: 'sidebar.workspaces', priority: 0 }, BaselineWorkspace as never)
   const disposeSettings = runtime.slots.register({ name: 'sidebar.settings', priority: 0 }, BaselineSettings as never)
+  const disposeConversation = runtime.slots.register({ name: 'conversation', priority: 0 }, BaselineConversation as never)
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
-  return { runtime, team, view, disposeWorkspace, disposeSettings, members, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, publishAgentReply, seedChannel, publishChannelUpdate, readThread, loadThreadHistory, threadObservations, changes }
+  return { runtime, team, view, disposeWorkspace, disposeSettings, disposeConversation, members, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, publishAgentReply, seedChannel, publishChannelUpdate, readThread, loadThreadHistory, threadObservations, changes }
 }

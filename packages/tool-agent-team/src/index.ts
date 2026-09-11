@@ -233,8 +233,9 @@ const teamInbox = defineTool({
     if (agent === undefined) throw new Error('team_inbox requires an Agent session')
     const current = member(agent)
     const host = service(agent)
-    const inbox = host.inboxForAgent(agent, { workspaceId: current.workspaceId, ...(args.limit === undefined ? {} : { limit: args.limit }) })
-    const taskNumbers = new Map(host.viewForAgent(agent, { workspaceId: current.workspaceId, topLevelOnly: true, includeActivities: false, direction: 'before' })
+    const workspaceId = host.resolveWorkspaceIdForAgent(agent) ?? current.workspaceId
+    const inbox = host.inboxForAgent(agent, { workspaceId, ...(args.limit === undefined ? {} : { limit: args.limit }) })
+    const taskNumbers = new Map(host.viewForAgent(agent, { workspaceId, topLevelOnly: true, includeActivities: false, direction: 'before' })
       .taskNumbers.map(entry => [entry.taskRef, entry.taskNumber] as const))
     return {
       totalUnreadCount: inbox.totalUnreadCount, totalDirectCount: inbox.totalDirectCount,
@@ -345,10 +346,11 @@ const teamThread = defineTool({
     const current = member(agent)
     const host = service(agent)
     if (args.threadRef === undefined && args.taskRef === undefined) throw new Error('team_thread requires threadRef')
-    const base = { workspaceId: current.workspaceId, ...(args.threadRef === undefined ? {} : { threadRef: args.threadRef as AgentTeamThreadRef }), ...(args.taskRef === undefined ? {} : { taskRef: args.taskRef as AgentTeamTaskRef }) }
+    const workspaceId = host.resolveWorkspaceIdForAgent(agent) ?? current.workspaceId
+    const base = { workspaceId, ...(args.threadRef === undefined ? {} : { threadRef: args.threadRef as AgentTeamThreadRef }), ...(args.taskRef === undefined ? {} : { taskRef: args.taskRef as AgentTeamTaskRef }) }
     const taskNumberOf = (task: { taskRef: AgentTeamTaskRef } | undefined): { taskNumber?: number } => {
       if (task === undefined) return {}
-      const resolved = host.resolveTaskRefs({ workspaceId: current.workspaceId, taskRefs: [task.taskRef] }).resolved[0]
+      const resolved = host.resolveTaskRefs({ workspaceId, taskRefs: [task.taskRef] }).resolved[0]
       return resolved === undefined ? {} : { taskNumber: resolved.taskNumber }
     }
     if (args.action === 'status') {
@@ -472,13 +474,14 @@ const teamMessage = markAgentTeamPreset(defineTool({
     if (agent === undefined) throw new Error('team_message requires an Agent session')
     const current = member(agent)
     const host = service(agent)
+    const workspaceId = host.resolveWorkspaceIdForAgent(agent) ?? current.workspaceId
     const mentions = args.mentions as AgentTeamMemberId[] | undefined
     const rawPaths = args.attachments
     const attachmentPaths = Array.isArray(rawPaths) ? rawPaths.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '') : undefined
     const paths = attachmentPaths !== undefined && attachmentPaths.length > 0 ? { attachmentPaths } : {}
     if (args.action === 'start') {
       if (args.channelRef === undefined || args.taskRef !== undefined || args.threadRef !== undefined || args.baseRevision !== undefined) throw new Error('start requires channelRef and does not accept threadRef, taskRef, or baseRevision')
-      const result = await host.sendMessageForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId: current.workspaceId,
+      const result = await host.sendMessageForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId,
         channelRef: args.channelRef as never, body: args.body, asTask: args.asTask === true, ...(mentions === undefined ? {} : { recipients: mentions }), ...paths })
       return messageOutcome(result, 'start')
     }
@@ -488,7 +491,7 @@ const teamMessage = markAgentTeamPreset(defineTool({
         throw new Error('dm requires memberRef and body only; it does not accept channelRef, threadRef, taskRef, baseRevision, asTask, mentions, or attachments')
       }
       try {
-        const result = await host.dmForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId: current.workspaceId,
+        const result = await host.dmForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId,
           recipientMemberId: args.memberRef as AgentTeamMemberId, body: args.body })
         return { kind: 'dm-sent', recipientMemberId: result.recipient.memberId, recipientHandle: result.recipient.handle, delivered: true, occurredAt: result.receipt.occurredAt }
       } catch (error) {
@@ -502,7 +505,7 @@ const teamMessage = markAgentTeamPreset(defineTool({
     if ((args.threadRef === undefined && args.taskRef === undefined) || args.channelRef !== undefined || args.asTask !== undefined || typeof baseRevision !== 'number' || !Number.isSafeInteger(baseRevision) || baseRevision < 1) {
       throw new Error('reply requires threadRef and a positive baseRevision; drain the Thread with team_thread read and copy the token it renders, or reuse the one your own last committed mutation rendered')
     }
-    const result = await host.replyForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId: current.workspaceId,
+    const result = await host.replyForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId,
       ...(args.threadRef === undefined ? {} : { threadRef: args.threadRef as AgentTeamThreadRef }),
       ...(args.taskRef === undefined ? {} : { taskRef: args.taskRef as AgentTeamTaskRef }),
       body: args.body, baseRevision,
@@ -574,7 +577,8 @@ const teamClaim = defineTool({
     if (agent === undefined) throw new Error('team_claim requires an Agent session')
     const current = member(agent)
     const host = service(agent)
-    const base = { workspaceId: current.workspaceId, taskRef: args.taskRef as AgentTeamTaskRef }
+    const workspaceId = host.resolveWorkspaceIdForAgent(agent) ?? current.workspaceId
+    const base = { workspaceId, taskRef: args.taskRef as AgentTeamTaskRef }
     if (args.action === 'list') {
       if (args.baseRevision !== undefined || args.direction !== undefined || args.claimRef !== undefined) throw new Error('list accepts only taskRef')
       const listed = host.listClaimsForAgent(agent, base)
@@ -654,7 +658,8 @@ const teamView = defineTool({
     if (agent === undefined) throw new Error('team_view requires an Agent session')
     const current = member(agent)
     const host = service(agent)
-    const view = host.viewForAgent(agent, { workspaceId: current.workspaceId, ...(args.channelRef === undefined ? {} : { channelRef: args.channelRef as never }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.cursor === undefined ? {} : { cursor: args.cursor }), topLevelOnly: true, includeActivities: false, direction: 'before' })
+    const workspaceId = host.resolveWorkspaceIdForAgent(agent) ?? current.workspaceId
+    const view = host.viewForAgent(agent, { workspaceId, ...(args.channelRef === undefined ? {} : { channelRef: args.channelRef as never }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.cursor === undefined ? {} : { cursor: args.cursor }), topLevelOnly: true, includeActivities: false, direction: 'before' })
     const visibleMemberIds = new Set(view.members.map(membership => membership.memberId))
     return {
       channels: view.channels.map(channel => ({ channelRef: channel.channelRef, name: channel.name })),
@@ -677,6 +682,8 @@ const teamView = defineTool({
     }
   },
 })
+
+export { teamInbox, teamThread, teamMessage, teamClaim, teamView }
 
 export function apply(ctx: Context): void {
   ctx.tools.register(teamInbox)
