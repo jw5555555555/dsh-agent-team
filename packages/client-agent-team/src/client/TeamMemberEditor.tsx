@@ -4,6 +4,7 @@ import type { TeamModelEffortOption, TeamModelProviderGroup, TeamSidebarProps } 
 import { Button, IconChevronDownOutline14, Input, Menu, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import { mintRequestId } from './requests.ts'
+import { TeamMemberMemoryDialog } from './TeamMemberMemoryDialog.tsx'
 import createCss from './create.module.css'
 import css from './sidebar.module.css'
 
@@ -137,7 +138,7 @@ export function ModelPickerField({ model, onModelChange, loadModels, disabled, t
  * through one durable update. Channel membership is managed from the Channel
  * side, not here.
  */
-export function AgentEditorDialog({ status, updateMember, loadModels, loadChannels, workspaces, canDemote: canDemoteProp, onCommitted, onClose, t }: {
+export function AgentEditorDialog({ status, updateMember, loadModels, loadChannels, workspaces, canDemote: canDemoteProp, onCommitted, onClose, getMemberMemory, updateMemberMemory, t }: {
   readonly status: AgentTeamClientMemberStatus
   readonly updateMember: TeamSidebarProps['updateMember']
   readonly loadModels: TeamSidebarProps['loadModels']
@@ -146,6 +147,8 @@ export function AgentEditorDialog({ status, updateMember, loadModels, loadChanne
   readonly canDemote?: boolean
   readonly onCommitted: () => Promise<void> | void
   readonly onClose: () => void
+  readonly getMemberMemory?: TeamSidebarProps['getMemberMemory'] | undefined
+  readonly updateMemberMemory?: TeamSidebarProps['updateMemberMemory'] | undefined
   readonly t: TeamSidebarProps['t']
 }) {
   const memberId = status.member.memberId
@@ -157,6 +160,7 @@ export function AgentEditorDialog({ status, updateMember, loadModels, loadChanne
   const [canDemote, setCanDemote] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string>()
+  const [memoryOpen, setMemoryOpen] = useState(false)
   const pendingRequest = useRef<AgentTeamUpdateMemberRequest>()
 
   useEffect(() => {
@@ -247,7 +251,23 @@ export function AgentEditorDialog({ status, updateMember, loadModels, loadChanne
         <label className={createCss.field}>
           <span>{t('agentDescription')}{t('optionalSuffix')}</span>
           <Input className={createCss.input!} value={description} placeholder={t('agentDescriptionPlaceholder')} onChange={event => { setDescription(event.target.value); pendingRequest.current = undefined }} disabled={saving} />
+          <small style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: '16px' }}>
+            {t('agentRoleDescriptionHint', { handle: handle.trim() || 'agent' })}
+          </small>
         </label>
+        {getMemberMemory !== undefined && updateMemberMemory !== undefined && (
+          <div className={createCss.field}>
+            <Button
+              variant="outline"
+              type="button"
+              disabled={saving}
+              onClick={() => { setMemoryOpen(true) }}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              {t('viewMemory')}
+            </Button>
+          </div>
+        )}
         <ModelPickerField model={model} onModelChange={choice => { pendingRequest.current = undefined; setModel(choice) }} loadModels={loadModels} disabled={saving} t={t} />
         <div className={createCss.field}>
           <span>{t('agentScope')}</span>
@@ -307,6 +327,15 @@ export function AgentEditorDialog({ status, updateMember, loadModels, loadChanne
         </div>
         {error !== undefined && <p className={createCss.error} role="alert">{error}</p>}
       </form>
+      {memoryOpen && getMemberMemory !== undefined && updateMemberMemory !== undefined && (
+        <TeamMemberMemoryDialog
+          status={status}
+          getMemberMemory={getMemberMemory}
+          updateMemberMemory={updateMemberMemory}
+          onClose={() => { setMemoryOpen(false) }}
+          t={t}
+        />
+      )}
     </Modal>
   )
 }

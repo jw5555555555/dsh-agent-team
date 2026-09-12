@@ -15,6 +15,7 @@ import { mintRequestId } from './requests.ts'
 import { TeamRowMenu } from './TeamRowMenu.tsx'
 import { TeamSidebarSection } from './TeamSidebarSection.tsx'
 import { AgentEditorDialog, ModelPickerField, sameModel } from './TeamMemberEditor.tsx'
+import { TeamMemberMemoryDialog } from './TeamMemberMemoryDialog.tsx'
 import createCss from './create.module.css'
 import css from './sidebar.module.css'
 
@@ -33,10 +34,12 @@ interface TeamAgentsPanelProps {
   readonly memberSessionId?: AgentTeamClientMemberStatus['member']['sessionId']
   readonly openMemberSession: TeamSidebarProps['openMemberSession']
   readonly onCreatingChange: (request: AgentTeamAddMemberRequest, creating: boolean) => void
+  readonly getMemberMemory?: TeamSidebarProps['getMemberMemory']
+  readonly updateMemberMemory?: TeamSidebarProps['updateMemberMemory']
   readonly t: TeamSidebarProps['t']
 }
 
-export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, recoverMember, archiveMember, loadModels, loadChannels, workspaces, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
+export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, recoverMember, archiveMember, loadModels, loadChannels, workspaces, memberSessionId, openMemberSession, onCreatingChange, getMemberMemory, updateMemberMemory, t }: TeamAgentsPanelProps) {
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
@@ -225,6 +228,9 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
           <label className={createCss.field}>
             <span>{t('agentDescription')}{t('optionalSuffix')}</span>
             <Input className={createCss.input!} value={description} placeholder={t('agentDescriptionPlaceholder')} onChange={event => { setDescription(event.target.value); setRetryRequest(undefined) }} disabled={creating} />
+            <small style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: '16px' }}>
+              {t('agentRoleDescriptionHint', { handle: handle.trim() || 'agent' })}
+            </small>
           </label>
           <ModelPickerField model={model} onModelChange={choice => { setModel(choice); setRetryRequest(undefined) }} loadModels={loadModels} disabled={creating} t={t} />
           <div className={createCss.field}>
@@ -280,7 +286,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         <div className={css.agentList}>
           {orderedMembers.map(status => (
             <SortableRow key={status.member.memberId} drag={drag} orderKey={status.member.memberId}>
-              <AgentRow status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} loadChannels={loadChannels} workspaces={workspaces} openMemberSession={openMemberSession} onUpdated={() => { void refresh() }} t={t} />
+              <AgentRow status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} loadChannels={loadChannels} workspaces={workspaces} openMemberSession={openMemberSession} onUpdated={() => { void refresh() }} getMemberMemory={getMemberMemory} updateMemberMemory={updateMemberMemory} t={t} />
             </SortableRow>
           ))}
         </div>
@@ -300,7 +306,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
  * conversation page, the avatar carries identity plus the presence badge, and
  * the row menu opens the editor.
  */
-function AgentRow({ status, current, updateMember, recoverMember, archiveMember, loadModels, loadChannels, workspaces, openMemberSession, onUpdated, t }: {
+function AgentRow({ status, current, updateMember, recoverMember, archiveMember, loadModels, loadChannels, workspaces, openMemberSession, onUpdated, getMemberMemory, updateMemberMemory, t }: {
   readonly status: AgentTeamClientMemberStatus
   /** This Member's Session is the one embedded in the conversation seat. */
   readonly current?: boolean
@@ -312,10 +318,13 @@ function AgentRow({ status, current, updateMember, recoverMember, archiveMember,
   readonly workspaces?: readonly { readonly workspaceId: WorkspaceId }[] | undefined
   readonly openMemberSession: TeamSidebarProps['openMemberSession']
   readonly onUpdated: () => Promise<void> | void
+  readonly getMemberMemory?: TeamSidebarProps['getMemberMemory'] | undefined
+  readonly updateMemberMemory?: TeamSidebarProps['updateMemberMemory'] | undefined
   readonly t: TeamSidebarProps['t']
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [memoryOpen, setMemoryOpen] = useState(false)
   const [archiving, setArchiving] = useState(false)
   const [rowAlert, setRowAlert] = useState<string>()
   // Both row actions ride the same runtime remote: the Host steers a live
@@ -378,12 +387,16 @@ function AgentRow({ status, current, updateMember, recoverMember, archiveMember,
             label={t('actionsAgent', { name: status.member.handle })}
             items={[
               { id: 'edit', label: t('editAgent'), icon: <IconEditOutline16 /> },
+              ...(getMemberMemory !== undefined && updateMemberMemory !== undefined
+                ? [{ id: 'memory', label: t('viewMemory') }]
+                : []),
               ...(status.presence === 'error' ? [{ id: 'resume', label: t('resumeAgent'), icon: <IconPlayOutline16 /> }] : []),
               ...(status.availability === 'unavailable' ? [{ id: 'restart', label: t('restartAgent'), icon: <IconRefreshOutline16 /> }] : []),
               { id: 'archive', label: t('archiveAgent'), icon: <IconArchiveOutline20 size={16} />, danger: true },
             ]}
             onSelect={(id) => {
               if (id === 'edit') setEditing(true)
+              else if (id === 'memory') setMemoryOpen(true)
               else if (id === 'archive') setArchiving(true)
               else void recover()
             }}
@@ -416,6 +429,17 @@ function AgentRow({ status, current, updateMember, recoverMember, archiveMember,
           workspaces={workspaces}
           onCommitted={onUpdated}
           onClose={() => { setEditing(false) }}
+          getMemberMemory={getMemberMemory}
+          updateMemberMemory={updateMemberMemory}
+          t={t}
+        />
+      )}
+      {memoryOpen && getMemberMemory !== undefined && updateMemberMemory !== undefined && (
+        <TeamMemberMemoryDialog
+          status={status}
+          getMemberMemory={getMemberMemory}
+          updateMemberMemory={updateMemberMemory}
+          onClose={() => { setMemoryOpen(false) }}
           t={t}
         />
       )}

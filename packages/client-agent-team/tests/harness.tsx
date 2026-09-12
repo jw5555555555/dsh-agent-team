@@ -191,6 +191,37 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     channels = channels.filter(channel => channel.channelRef !== request.channelRef)
     return { ok: true as const, value: { receipt: {}, channel: archived, releasedClaims: [] } }
   })
+  const memoryContents = new Map<string, string>()
+  const getMemberMemory = vi.fn(async (request: { memberId: string }) => {
+    const member = memberRows.find(entry => entry.member.memberId === request.memberId)?.member
+    const content = memoryContents.get(request.memberId) ?? ''
+    const byteSize = new TextEncoder().encode(content).length
+    return {
+      ok: true as const,
+      value: {
+        memberId: request.memberId,
+        handle: member?.handle ?? request.memberId,
+        memoryPath: `/data/members/${request.memberId}/memory.md`,
+        exists: content.length > 0,
+        content,
+        byteSize,
+        notesCount: 0,
+        skillsCount: 0,
+      },
+    }
+  })
+  const updateMemberMemory = vi.fn(async (request: { memberId: string; content: string }) => {
+    memoryContents.set(request.memberId, request.content)
+    const byteSize = new TextEncoder().encode(request.content).length
+    return {
+      ok: true as const,
+      value: {
+        memberId: request.memberId,
+        byteSize,
+        updated: true,
+      },
+    }
+  })
   const modelCatalog = vi.fn(async () => ({ ok: true as const, value: {
     groups: [{ id: 'deepseek-official', name: 'DeepSeek', models: [
       { id: 'deepseek-chat', name: 'DeepSeek Chat', reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }] } },
@@ -320,7 +351,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   }
   // rc.1: the client injects the model-catalog sub-namespace explicitly.
   runtime.ctx.provide('remote.session', { modelCatalog })
-  runtime.ctx.provide('remote', { session: { modelCatalog }, agentTeam: { members, addMember, view: viewChannels, readThread, threadHistory: loadThreadHistory, threadObservations, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, joinChannel, removeChannelMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, changes }, $mount: async () => async () => {} } as never)
+  runtime.ctx.provide('remote', { session: { modelCatalog }, agentTeam: { members, addMember, view: viewChannels, readThread, threadHistory: loadThreadHistory, threadObservations, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, joinChannel, removeChannelMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, getMemberMemory, updateMemberMemory, changes }, $mount: async () => async () => {} } as never)
   runtime.ctx.provide('remote.agentTeam', {})
   runtime.ctx.provide('connection', { isLoopback: true, generation: { getSnapshot: () => ({}) }, state: { getSnapshot: () => ({}) }, rpc: {}, reconnect: vi.fn(), registerGenerationSource: vi.fn(), start: vi.fn(), stop: vi.fn() })
   await runtime.sessions.add({ id: 'ordinary-session', summary: { title: 'Ordinary', cwd: '/work/alpha' } })

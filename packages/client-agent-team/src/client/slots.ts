@@ -15,6 +15,10 @@ import type {
   AgentTeamJoinChannelResult,
   AgentTeamGetAttachmentRequest,
   AgentTeamGetAttachmentResult,
+  AgentTeamGetMemberMemoryRequest,
+  AgentTeamGetMemberMemoryResult,
+  AgentTeamUpdateMemberMemoryRequest,
+  AgentTeamUpdateMemberMemoryResult,
   AgentTeamPutAttachmentRequest,
   AgentTeamPutAttachmentResult,
   AgentTeamMemberResult,
@@ -101,6 +105,8 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
     updateChannel: (request: AgentTeamUpdateChannelRequest) => Promise<RemoteResult<AgentTeamUpdateChannelResult>>
     archiveChannel: (request: AgentTeamArchiveChannelRequest) => Promise<RemoteResult<AgentTeamArchiveChannelResult>>
     updateMember: (request: AgentTeamUpdateMemberRequest) => Promise<RemoteResult<AgentTeamMemberResult>>
+    getMemberMemory: (request: AgentTeamGetMemberMemoryRequest) => Promise<RemoteResult<AgentTeamGetMemberMemoryResult>>
+    updateMemberMemory: (request: AgentTeamUpdateMemberMemoryRequest) => Promise<RemoteResult<AgentTeamUpdateMemberMemoryResult>>
     recoverMember: (request: AgentTeamRecoverMemberRequest) => Promise<RemoteResult<AgentTeamRecoverMemberResult>>
     /**
      * Host clear-context remote kept as a hidden migration escape hatch.

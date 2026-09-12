@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -28,7 +29,7 @@ import { ContextManagementCoordinator, type TransitionPlan } from './context-man
 import { createHandoffMessage } from './context-source.ts'
 import { carriedInputOf, checkpointByRef, checkpointRefFor, foldContextProjection, isReminderNoticeSummary, timelineCandidates, type AgentTeamContextProjectionState, type TimelineCandidate } from './context-projection.ts'
 import { AGENT_TEAM_HUMAN_MEMBER_ID, AgentTeamLedger, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
-import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, MemberRuntime } from './member-runtime.ts'
+import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, memberMemoryDirectoryPath, MemberRuntime } from './member-runtime.ts'
 import { ProgressNudgeCoordinator } from './progress-nudge.ts'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
 import { classifyRecoverableError, RecoveryCoordinator, RECOVERY_MAX_CONSECUTIVE_ERRORS } from './recovery.ts'
@@ -80,6 +81,10 @@ import type {
   AgentTeamRecoverMemberResult,
   AgentTeamClearMemberContextRequest,
   AgentTeamClearMemberContextResult,
+  AgentTeamGetMemberMemoryRequest,
+  AgentTeamGetMemberMemoryResult,
+  AgentTeamUpdateMemberMemoryRequest,
+  AgentTeamUpdateMemberMemoryResult,
   AgentTeamRolloverSessionRequest,
   AgentTeamDmRequest,
   AgentTeamDmResult,
@@ -811,6 +816,68 @@ export default class AgentTeam extends TypertRemoteService {
         throw new Error(`Agent Member '${stored.handle}' failed to start a new context: ${this.memberFailures.get(request.memberId)?.activation ?? 'unknown error'}`)
       }
       return Object.freeze({ receipt: result.value.receipt, status: this.memberStatus(renewed) })
+    })
+  }
+
+  /** Read one Member's private memory index and metadata for client inspection. */
+  @Remote('getMemberMemory')
+  async getMemberMemory(request: AgentTeamGetMemberMemoryRequest): Promise<AgentTeamGetMemberMemoryResult> {
+    this.requireAccepting()
+    const member = this.requireLedger().getMember(request.memberId)
+    if (member === undefined) throw new Error(`unknown Member '${request.memberId}'`)
+    const memoryPath = memberMemoryDirectoryPath(member)
+    let content = ''
+    let exists = false
+    try {
+      const raw = await readFile(`${memoryPath}/memory.md`)
+      content = raw.toString('utf8')
+      exists = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    let notesCount = 0
+    try {
+      const notes = await readdir(`${memoryPath}/notes`)
+      notesCount = notes.length
+    } catch {
+      // notes directory absent or empty
+    }
+    let skillsCount = 0
+    try {
+      const skills = await readdir(`${memoryPath}/skills`)
+      skillsCount = skills.length
+    } catch {
+      // skills directory absent or empty
+    }
+    return Object.freeze({
+      memberId: member.memberId,
+      handle: member.handle,
+      memoryPath,
+      exists,
+      content,
+      byteSize: Buffer.byteLength(content, 'utf8'),
+      notesCount,
+      skillsCount,
+    })
+  }
+
+  /** Update one Member's private memory index within the 8 KiB budget. */
+  @Remote('updateMemberMemory')
+  async updateMemberMemory(request: AgentTeamUpdateMemberMemoryRequest): Promise<AgentTeamUpdateMemberMemoryResult> {
+    this.requireAccepting()
+    const member = this.requireLedger().getMember(request.memberId)
+    if (member === undefined) throw new Error(`unknown Member '${request.memberId}'`)
+    const memoryPath = memberMemoryDirectoryPath(member)
+    const bytes = Buffer.from(request.content, 'utf8')
+    if (bytes.byteLength > 8 * 1024) {
+      throw new Error(`Memory content exceeds the 8 KiB budget (${bytes.byteLength} bytes)`)
+    }
+    await mkdir(memoryPath, { recursive: true })
+    await writeFile(`${memoryPath}/memory.md`, bytes)
+    return Object.freeze({
+      memberId: member.memberId,
+      byteSize: bytes.byteLength,
+      updated: true,
     })
   }
 

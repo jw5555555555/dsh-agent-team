@@ -177,6 +177,38 @@ export interface AgentTeamClearMemberContextResult {
   readonly status: AgentTeamAgentMemberStatus
 }
 
+/** Human intent to inspect one Member's private memory. */
+export interface AgentTeamGetMemberMemoryRequest {
+  readonly workspaceId?: WorkspaceId | undefined
+  readonly memberId: AgentTeamMemberId
+}
+
+/** Content and metadata of one Member's private memory index. */
+export interface AgentTeamGetMemberMemoryResult {
+  readonly memberId: AgentTeamMemberId
+  readonly handle: string
+  readonly memoryPath: string
+  readonly exists: boolean
+  readonly content: string
+  readonly byteSize: number
+  readonly notesCount: number
+  readonly skillsCount: number
+}
+
+/** Human intent to update one Member's private memory. */
+export interface AgentTeamUpdateMemberMemoryRequest {
+  readonly workspaceId?: WorkspaceId | undefined
+  readonly memberId: AgentTeamMemberId
+  readonly content: string
+}
+
+/** Result of updating one Member's private memory. */
+export interface AgentTeamUpdateMemberMemoryResult {
+  readonly memberId: AgentTeamMemberId
+  readonly byteSize: number
+  readonly updated: boolean
+}
+
 /**
  * Member-authored intent (carried by its live Agent) to continue in its next
  * private context generation. The requestId and new Session id derive stably
